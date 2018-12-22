@@ -55,7 +55,7 @@ void WINAPI _export GetOpenPluginInfo(HANDLE hPlugin,
 	CustomColumnTitles[3] = GetMsg(MStatus);
 	static PanelMode CustomPanelModes[10];
 	static char ColumnTypes[] = "N, C0, C1, C2";
-	static char ColumnWidths[] = "5, 21, 21, 0";
+	static char ColumnWidths[] = "5, 21, 21, 20";
 	for (int i = 0; i < 10; i++)
 	{
 		CustomPanelModes[i].ColumnTypes = ColumnTypes;
@@ -74,6 +74,7 @@ void WINAPI _export GetOpenPluginInfo(HANDLE hPlugin,
 	Info->PanelModesArray = (const struct PanelMode *) &CustomPanelModes;
 	Info->PanelModesNumber = 10;
     Info->PanelTitle = CustomTitle;
+	Info->Flags = OPIF_ADDDOTS | OPIF_SHOWPRESERVECASE;
 }
 
 
@@ -139,7 +140,7 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 		for (; i < Num; i++)
 		{
 			char tmp_str[CHAR_BUFF];
-			strcpy (pItems[i].FindData.cFileName, "tcp");
+			strcpy (pItems[i].FindData.cFileName, " tcp ");
 			pItems[i].CustomColumnData = (char**) malloc (NCOUNT * sizeof(void *));
 			pItems[i].CustomColumnNumber = NCOUNT;
 			pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF);
@@ -214,7 +215,7 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 		for (; i < (Num + NumUDP); i++)
 		{
 			char tmp_str[CHAR_BUFF];
-			strcpy (pItems[i].FindData.cFileName, "udp");
+			strcpy (pItems[i].FindData.cFileName, " udp ");
 			pItems[i].CustomColumnData = (char**) malloc (NCOUNT * sizeof(void *));
 			pItems[i].CustomColumnNumber = NCOUNT;
 			pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF);
@@ -240,6 +241,9 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 	if (pTcpTable)
 		free(pTcpTable);
 
+	if (pUdpTable)
+		free(pUdpTable);
+
     *pPanelItem = pItems; 
     *pItemsNumber = Num + NumUDP;
     return TRUE;
@@ -252,8 +256,22 @@ void WINAPI _export FreeFindData(HANDLE hPlugin,
 	for (int i = 0; i < ItemsNumber; i++)
 	{
 		for (int j = 0; j < PanelItem[i].CustomColumnNumber; j++)
-			free (PanelItem[i].CustomColumnData[j]);
-		free (PanelItem[i].CustomColumnData);
+			free(PanelItem[i].CustomColumnData[j]);
+		free(PanelItem[i].CustomColumnData);
 	}
-	free (PanelItem);
+	free(PanelItem);
 } 
+
+int WINAPI _export ProcessEvent(HANDLE hPlugin,
+								int Event,
+								void *Param)
+{
+	if (Event == FE_IDLE)
+	{
+		//Info.Control(hPlugin, FCTL_GETPANELINFO, &PInfo);
+
+		Info.Control(hPlugin, FCTL_UPDATEPANEL, (void *)TRUE);
+		Info.Control(hPlugin, FCTL_REDRAWPANEL, NULL);
+	}
+	return FALSE;
+}

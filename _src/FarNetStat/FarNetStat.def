@@ -6,3 +6,4 @@ EXPORTS
 	GetOpenPluginInfo
 	GetFindData
 	FreeFindData
+	ProcessEvent
