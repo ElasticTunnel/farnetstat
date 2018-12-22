@@ -30,6 +30,7 @@ static char *TCPports[65536];
 static BOOL Resolve = FALSE;
 static BOOL AutoRefresh = TRUE;
 static BOOL PortsLoaded = FALSE;
+static CRITICAL_SECTION cs;
 
 struct IPNameSave
 {
@@ -64,6 +65,7 @@ struct SingleInitDialogItem
 char *GetNameByIP(DWORD IP)
 {
 	char *ret = NULL;
+	EnterCriticalSection(&cs);
 	IPNameSave *IPNameTemp = IPNameSaveHead;
 	while (IPNameTemp)
 	{
@@ -74,6 +76,7 @@ char *GetNameByIP(DWORD IP)
 		}
 		IPNameTemp = IPNameTemp->Next;
 	}
+	LeaveCriticalSection(&cs);
 	return ret;
 }
 
@@ -81,6 +84,7 @@ void SaveIP(DWORD IP, char *Name)
 {
 	if (GetNameByIP(IP) == NULL)
 	{
+		EnterCriticalSection(&cs);
 		IPNameSave *IPNameTemp = (struct IPNameSave *)malloc(sizeof(IPNameSave));
 		if (IPNameTemp)
 		{
@@ -94,6 +98,7 @@ void SaveIP(DWORD IP, char *Name)
 				strcpy(IPNameTemp->Name, Name);
 			}
 		}
+		LeaveCriticalSection(&cs);
 	}
 }
 
@@ -293,6 +298,11 @@ void WINAPI _export SetStartupInfo(const struct PluginStartupInfo *psi)
 {
 	Info = *psi;
 
+	InitializeCriticalSection(&cs);
+
+	WSAData wsadata;
+	WSAStartup(MAKEWORD(2,2), &wsadata);
+
 	HKEY handle_reg_key;
 	DWORD tmp_dat;
 	if (RegOpenKeyEx(	HKEY_CURRENT_USER,
@@ -340,6 +350,8 @@ void WINAPI _export ExitFAR(void)
 			free(TCPports[i]);
 	}
 
+
+	EnterCriticalSection(&cs);
 	IPNameSave *IPNameTmp;
 	IPNameSave *IPNameTemp = IPNameSaveHead;
 	while (IPNameTemp)
@@ -350,6 +362,8 @@ void WINAPI _export ExitFAR(void)
 		IPNameTemp = IPNameTemp->Next;
 		free(IPNameTmp);
 	}
+	LeaveCriticalSection(&cs);
+	DeleteCriticalSection(&cs);
 }
 
 void WINAPI _export GetPluginInfo(struct PluginInfo *pi)
@@ -405,6 +419,69 @@ void WINAPI _export GetOpenPluginInfo(HANDLE hPlugin,
 	Info->Flags = OPIF_ADDDOTS | OPIF_SHOWPRESERVECASE;
 }
 
+char *TranslateIP(DWORD IP)
+{
+	static char buff[32];
+	memset(buff, 0, sizeof(buff));
+	char tmp[32];
+	memset(tmp, 0, sizeof(tmp));
+	DWORD temp = IP & 255;
+	itoa(temp, tmp, 10);
+	strcat(buff, tmp);
+	strcat(buff, ".");
+	memset(tmp, 0, sizeof(tmp));
+	temp = (IP >> 8) & 255;
+	itoa(temp, tmp, 10);
+	strcat(buff, tmp);
+	strcat(buff, ".");
+	memset(tmp, 0, sizeof(tmp));
+	temp = (IP >> 16) & 255;
+	itoa(temp, tmp, 10);
+	strcat(buff, tmp);
+	strcat(buff, ".");
+	memset(tmp, 0, sizeof(tmp));
+	temp = (IP >> 24)  & 255;
+	itoa(temp, tmp, 10);
+	strcat(buff, tmp);
+	return (char *)&buff;
+}
+
+void ResolveThread(DWORD *IP)
+{
+	DWORD ip = *IP;
+	free(IP);
+	int LastError = 0;
+	char *TableName = GetNameByIP(ip);
+	struct hostent *host;
+	if (!TableName)
+	{
+		host = gethostbyaddr((char *)&ip, sizeof(ip), AF_INET);
+		LastError = WSAGetLastError();
+		if (LastError != 0)
+		{
+			TableName = TranslateIP(ip);
+			SaveIP(ip, TableName);
+		}
+		else
+			SaveIP(ip, host->h_name);
+	}
+}
+
+char *ResolveIP(DWORD IP)
+{
+	int LastError = 0;
+	char *TableName = GetNameByIP(IP);
+	if (!TableName)
+	{
+		TableName = TranslateIP(IP);
+		DWORD *ip = (DWORD *)malloc(sizeof(DWORD));
+		*ip = IP;
+		DWORD dwDummy = NULL;
+		HANDLE hTh = CreateThread(NULL, NULL, (LPTHREAD_START_ROUTINE)ResolveThread, ip, NULL, &dwDummy);
+		CloseHandle(hTh);
+	}
+	return TableName;
+}
 
 int WINAPI _export GetFindData(	HANDLE hPlugin,
 								struct PluginPanelItem **pPanelItem,
@@ -454,8 +531,6 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 	}
 	unsigned int Num = pTcpTable->dwNumEntries;
 	unsigned int NumUDP = pUdpTable->dwNumEntries;
-	WSAData wsadata;
-	WSAStartup(MAKEWORD(2,2), &wsadata);
 
 #pragma pack(2)
 	PluginPanelItem *pItems = (PluginPanelItem *)malloc ((Num + NumUDP) * sizeof(PluginPanelItem));
@@ -467,32 +542,20 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 		if (Ok)
 		for (; i < Num; i++)
 		{
-			char tmp_str[CHAR_BUFF];
 			strcpy (pItems[i].FindData.cFileName, " tcp ");
 			pItems[i].CustomColumnData = (char**) malloc (NCOUNT * sizeof(void *));
 			pItems[i].CustomColumnNumber = NCOUNT;
 			if (Resolve == TRUE)
 			{
 #pragma pack(8)
-				DWORD ip = pTcpTable->table[i].dwLocalAddr;
-#pragma pack(1)
-				char *TableName = GetNameByIP(ip);
-#pragma pack(8)
-				u_short nPort = htons((unsigned short)pTcpTable->table[i].dwLocalPort);
 				DWORD len = 2;
-				char *pBuff;
-				struct hostent *host;
-				if (!TableName)
-				{
-					host = gethostbyaddr((char *)&pTcpTable->table[i].dwLocalAddr, 4, AF_INET);
-					len += strlen(host->h_name);
-					SaveIP(pTcpTable->table[i].dwLocalAddr, host->h_name);
-				}
-				else
-				{
-					len += strlen(TableName);
-				}
+				DWORD ip = pTcpTable->table[i].dwLocalAddr;
+				u_short nPort = htons((unsigned short)pTcpTable->table[i].dwLocalPort);
 #pragma pack(2)
+				char *TableName = ResolveIP(ip);
+				char *pBuff;
+				if (TableName)
+					len += strlen(TableName);				
 				if (TCPports[nPort])
 					len += strlen(TCPports[nPort]);
 				else
@@ -500,12 +563,10 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				pBuff = (char *) malloc(len);
 				if (pBuff)
 				{
-#pragma pack(8)
-					if (!TableName)
-						strcpy(pBuff, host->h_name);
-					else
+					if (TableName)
 						strcpy(pBuff, TableName);
-#pragma pack(2)
+					else
+						strcpy(pBuff, "");
 					strcat(pBuff, ":");
 					if (TCPports[nPort])
 						strcat(pBuff, TCPports[nPort]);
@@ -529,97 +590,33 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				{
 #pragma pack(8)
 					DWORD ip = pTcpTable->table[i].dwRemoteAddr;
-#pragma pack(1)
-					char *TableName = GetNameByIP(ip);
-#pragma pack(8)
 					nPort = htons((unsigned short)pTcpTable->table[i].dwRemotePort);
+#pragma pack(2)
+					char *TableName = ResolveIP(ip);
+
 					len = 2;
-					int LastError = 0;
-					if (!TableName)
-					{
-						host = gethostbyaddr((char *)&pTcpTable->table[i].dwRemoteAddr, 4, AF_INET);
-						LastError = WSAGetLastError();
-					}
-					if (LastError == 0)
-					{
-						if (!TableName)
-						{
-							len += strlen(host->h_name);
-							SaveIP(pTcpTable->table[i].dwRemoteAddr, host->h_name);
-						}
-						else
-							len += strlen(TableName);
-#pragma pack(2)
-						if (TCPports[nPort])
-							len += strlen(TCPports[nPort]);
-						else
-							len += 5;
-						pBuff = (char *) malloc(len);
-						if (pBuff)
-						{
-#pragma pack(8)
-							if (!TableName)
-								strcpy(pBuff, host->h_name);
-							else
-								strcpy(pBuff, TableName);
-#pragma pack(2)
-							strcat(pBuff, ":");
-							if (TCPports[nPort])
-								strcat(pBuff, TCPports[nPort]);
-							else
-							{
-								char buff[MIN_BUFF];
-								itoa(nPort, buff, 10);
-								strcat(pBuff, buff);
-							}
-						}
-						pItems[i].CustomColumnData[1] = pBuff;
-					}
+					if (TableName)
+						len += strlen(TableName);
+					if (TCPports[nPort])
+						len += strlen(TCPports[nPort]);
 					else
+						len += 5;
+					pBuff = (char *) malloc(len);
+					if (pBuff)
 					{
-						DWORD dw_len = CHAR_BUFF;
-						sockaddr_in addr;
-						addr.sin_family = AF_INET;
-						pItems[i].CustomColumnData[1] = (char *) malloc(CHAR_BUFF);
-						memset(pItems[i].CustomColumnData[1], 0, CHAR_BUFF);
-#pragma pack(8)
-						addr.sin_port = (WORD) pTcpTable->table[i].dwRemotePort;
-						addr.sin_addr.S_un.S_addr = pTcpTable->table[i].dwRemoteAddr;
-						memset(tmp_str, 0, CHAR_BUFF);
-						WSAAddressToString((sockaddr *)&addr, sizeof(addr), NULL, (char *)&tmp_str, &dw_len);
-						if (!GetNameByIP(pTcpTable->table[i].dwRemoteAddr))
-						{
-							char tmp_buff[CHAR_BUFF];
-							strcpy(tmp_buff, tmp_str);
-							int count = strlen(tmp_buff);
-							while (tmp_buff[count] != ':')
-							{
-								tmp_buff[count] = 0;
-								count--;
-							}
-							tmp_buff[count] = 0;
-							SaveIP(pTcpTable->table[i].dwRemoteAddr, tmp_buff);
-						}
-#pragma pack(2)
-						strcpy(pItems[i].CustomColumnData[1], tmp_str);
+						if (TableName)
+							strcpy(pBuff, TableName);
+						strcat(pBuff, ":");
 						if (TCPports[nPort])
+							strcat(pBuff, TCPports[nPort]);
+						else
 						{
-							char *temp;
-							int lent = strlen(TCPports[nPort]);
-							int j = 0;
-							for (; pItems[i].CustomColumnData[1][j] != ':'; j++);
-							pItems[i].CustomColumnData[1][j + 1] = 0;
-							lent += strlen(pItems[i].CustomColumnData[1]) + 1;
-							temp = (char *)malloc(lent);
-							if (temp)
-							{
-								strcpy(temp, pItems[i].CustomColumnData[1]);
-								strcat(temp, TCPports[nPort]);
-							}
-							free(pItems[i].CustomColumnData[1]);
-							pItems[i].CustomColumnData[1] = temp;
+							char buff[MIN_BUFF];
+							itoa(nPort, buff, 10);
+							strcat(pBuff, buff);
 						}
 					}
+					pItems[i].CustomColumnData[1] = pBuff;
 				}
 			}
 			else
@@ -627,24 +624,34 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF);
 				memset(pItems[i].CustomColumnData[0], 0, CHAR_BUFF);
 #pragma pack(8)
-				DWORD dw_len = CHAR_BUFF;
-				sockaddr_in addr;
-				addr.sin_family = AF_INET;
-				addr.sin_port = (WORD) pTcpTable->table[i].dwLocalPort;
-				addr.sin_addr.S_un.S_addr = pTcpTable->table[i].dwLocalAddr;
-				memset(tmp_str, 0, CHAR_BUFF);
-				WSAAddressToString((sockaddr *)&addr, sizeof(addr), NULL, (char *)&tmp_str, &dw_len);
+				DWORD ip = pTcpTable->table[i].dwLocalAddr;
+				u_short nPort = htons((unsigned short)pTcpTable->table[i].dwLocalPort);
 #pragma pack(2)
-				strcpy(pItems[i].CustomColumnData[0], tmp_str);
+				char *TransBuff = TranslateIP(ip);
+				if (TransBuff)
+					strcpy(pItems[i].CustomColumnData[0], TransBuff);
+				strcat(pItems[i].CustomColumnData[0], ":");
+				char buff[MIN_BUFF];
+				memset(buff, 0, sizeof(buff));
+				itoa(nPort, buff, 10);
+				strcat(pItems[i].CustomColumnData[0], buff);
+				
 				pItems[i].CustomColumnData[1] = (char *) malloc(CHAR_BUFF);
 				memset(pItems[i].CustomColumnData[1], 0, CHAR_BUFF);
+				if (pTcpTable->table[i].dwState != MIB_TCP_STATE_LISTEN)
+				{
 #pragma pack(8)
-				addr.sin_port = (WORD) pTcpTable->table[i].dwRemotePort;
-				addr.sin_addr.S_un.S_addr = pTcpTable->table[i].dwRemoteAddr;
-				memset(tmp_str, 0, CHAR_BUFF);
-				WSAAddressToString((sockaddr *)&addr, sizeof(addr), NULL, (char *)&tmp_str, &dw_len);
+					ip = pTcpTable->table[i].dwRemoteAddr;
+					nPort = htons((unsigned short)pTcpTable->table[i].dwRemotePort);
 #pragma pack(2)
-				strcpy(pItems[i].CustomColumnData[1], tmp_str);
+					TransBuff = TranslateIP(ip);
+					if (TransBuff)
+						strcpy(pItems[i].CustomColumnData[1], TransBuff);
+					strcat(pItems[i].CustomColumnData[1], ":");
+					memset(buff, 0, sizeof(buff));
+					itoa(nPort, buff, 10);
+					strcat(pItems[i].CustomColumnData[1], buff);
+				}
 			}
 			pItems[i].CustomColumnData[2] = (char *) malloc(CHAR_BUFF);
 			memset(pItems[i].CustomColumnData[2], 0, CHAR_BUFF);
@@ -696,7 +703,6 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 		if (OkUDP)
 		for (; i < (Num + NumUDP); i++)
 		{
-			char tmp_str[CHAR_BUFF];
 			strcpy (pItems[i].FindData.cFileName, " udp ");
 			pItems[i].CustomColumnData = (char**) malloc (NCOUNT * sizeof(void *));
 			pItems[i].CustomColumnNumber = NCOUNT;
@@ -704,25 +710,14 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 			if (Resolve == TRUE)
 			{
 #pragma pack(8)
-				DWORD ip = pTcpTable->table[i].dwLocalAddr;
-#pragma pack(1)
-				char *TableName = GetNameByIP(ip);
-#pragma pack(8)
+				DWORD ip = pUdpTable->table[i - Num].dwLocalAddr;
 				u_short nPort = htons((unsigned short)pUdpTable->table[i - Num].dwLocalPort);
-				DWORD len = 2;
-				char *pBuff;
-				struct hostent *host;
-				if (!TableName)
-				{
-					host = gethostbyaddr((char *)&pUdpTable->table[i - Num].dwLocalAddr, 4, AF_INET);
-					len += strlen(host->h_name);
-					SaveIP(pUdpTable->table[i - Num].dwLocalAddr, host->h_name);
-				}
-				else
-				{
-					len += strlen(TableName);
-				}
 #pragma pack(2)
+				char *TableName = ResolveIP(ip);
+				char *pBuff;
+				int len = 2;
+				if (TableName)
+					len += strlen(TableName);
 				if (UDPports[nPort])
 					len += strlen(UDPports[nPort]);
 				else
@@ -730,12 +725,8 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				pBuff = (char *) malloc(len);
 				if (pBuff)
 				{
-#pragma pack(8)
-					if (!TableName)
-						strcpy(pBuff, host->h_name);
-					else
+					if (TableName)
 						strcpy(pBuff, TableName);
-#pragma pack(2)
 					strcat(pBuff, ":");
 					if (UDPports[nPort])
 						strcat(pBuff, UDPports[nPort]);
@@ -749,19 +740,21 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				pItems[i].CustomColumnData[0] = pBuff;
 			}
 			else
-			{
+			{				
 				pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF);
 				memset(pItems[i].CustomColumnData[0], 0, CHAR_BUFF);
 #pragma pack(8)
-				DWORD dw_len = CHAR_BUFF;
-				sockaddr_in addr;
-				addr.sin_family = AF_INET;
-				addr.sin_port = (WORD) pUdpTable->table[i - Num].dwLocalPort;
-				addr.sin_addr.S_un.S_addr = pUdpTable->table[i - Num].dwLocalAddr;
-				memset(tmp_str, 0, CHAR_BUFF);
-				WSAAddressToString((sockaddr *)&addr, sizeof(addr), NULL, (char *)&tmp_str, &dw_len);
+				DWORD ip = pUdpTable->table[i - Num].dwLocalAddr;
+				u_short nPort = htons((unsigned short)pUdpTable->table[i - Num].dwLocalPort);
 #pragma pack(2)
-				strcpy(pItems[i].CustomColumnData[0], tmp_str);
+				char *TransBuff = TranslateIP(ip);
+				if (TransBuff)
+					strcpy(pItems[i].CustomColumnData[0], TransBuff);
+				strcat(pItems[i].CustomColumnData[0], ":");
+				char buff[MIN_BUFF];
+				memset(buff, 0, sizeof(buff));
+				itoa(nPort, buff, 10);
+				strcat(pItems[i].CustomColumnData[0], buff);
 			}
 			pItems[i].CustomColumnData[1] = (char *) malloc(CHAR_BUFF);
 			memset(pItems[i].CustomColumnData[1], 0, CHAR_BUFF);
