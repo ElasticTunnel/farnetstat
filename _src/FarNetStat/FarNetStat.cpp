@@ -31,6 +31,15 @@ static BOOL Resolve = FALSE;
 static BOOL AutoRefresh = TRUE;
 static BOOL PortsLoaded = FALSE;
 
+struct IPNameSave
+{
+	DWORD IP;
+	char *Name;
+	IPNameSave *Next;
+};
+
+IPNameSave *IPNameSaveHead = NULL;
+
 struct InitDialogItem
 {
 	int Type;
@@ -52,12 +61,46 @@ struct SingleInitDialogItem
 	signed char Data;
 };
 
+char *GetNameByIP(DWORD IP)
+{
+	char *ret = NULL;
+	IPNameSave *IPNameTemp = IPNameSaveHead;
+	while (IPNameTemp)
+	{
+		if (IPNameTemp->IP == IP)
+		{
+			ret = IPNameTemp->Name;
+			break;
+		}
+		IPNameTemp = IPNameTemp->Next;
+	}
+	return ret;
+}
+
+void SaveIP(DWORD IP, char *Name)
+{
+	if (GetNameByIP(IP) == NULL)
+	{
+		IPNameSave *IPNameTemp = (struct IPNameSave *)malloc(sizeof(IPNameSave));
+		if (IPNameTemp)
+		{
+			memset(IPNameTemp, 0, sizeof(IPNameSave));
+			IPNameTemp->Next = IPNameSaveHead;
+			IPNameSaveHead = IPNameTemp;
+			IPNameTemp->IP = IP;
+			if (Name)
+			{
+				IPNameTemp->Name = (char *)malloc(strlen(Name) + 1);
+				strcpy(IPNameTemp->Name, Name);
+			}
+		}
+	}
+}
+
 char *GetMsg(int MsgId)
 {
 	return((char *)Info.GetMsg(Info.ModuleNumber, MsgId));
 }
-
-
 
 void InitDialogItems(	const struct SingleInitDialogItem *Init,
 						struct FarDialogItem *Item,
@@ -296,6 +339,17 @@ void WINAPI _export ExitFAR(void)
 		if (TCPports[i])
 			free(TCPports[i]);
 	}
+
+	IPNameSave *IPNameTmp;
+	IPNameSave *IPNameTemp = IPNameSaveHead;
+	while (IPNameTemp)
+	{
+		if (IPNameTemp->Name)
+			free(IPNameTemp->Name);
+		IPNameTmp = IPNameTemp;
+		IPNameTemp = IPNameTemp->Next;
+		free(IPNameTmp);
+	}
 }
 
 void WINAPI _export GetPluginInfo(struct PluginInfo *pi)
@@ -420,11 +474,24 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 			if (Resolve == TRUE)
 			{
 #pragma pack(8)
+				DWORD ip = pTcpTable->table[i].dwLocalAddr;
+#pragma pack(1)
+				char *TableName = GetNameByIP(ip);
+#pragma pack(8)
 				u_short nPort = htons((unsigned short)pTcpTable->table[i].dwLocalPort);
 				DWORD len = 2;
 				char *pBuff;
-				struct hostent *host = gethostbyaddr((char *)&pTcpTable->table[i].dwLocalAddr, 4, AF_INET);
-				len += strlen(host->h_name);
+				struct hostent *host;
+				if (!TableName)
+				{
+					host = gethostbyaddr((char *)&pTcpTable->table[i].dwLocalAddr, 4, AF_INET);
+					len += strlen(host->h_name);
+					SaveIP(pTcpTable->table[i].dwLocalAddr, host->h_name);
+				}
+				else
+				{
+					len += strlen(TableName);
+				}
 #pragma pack(2)
 				if (TCPports[nPort])
 					len += strlen(TCPports[nPort]);
@@ -434,7 +501,10 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				if (pBuff)
 				{
 #pragma pack(8)
-					strcpy(pBuff, host->h_name);
+					if (!TableName)
+						strcpy(pBuff, host->h_name);
+					else
+						strcpy(pBuff, TableName);
 #pragma pack(2)
 					strcat(pBuff, ":");
 					if (TCPports[nPort])
@@ -458,13 +528,27 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				else
 				{
 #pragma pack(8)
+					DWORD ip = pTcpTable->table[i].dwRemoteAddr;
+#pragma pack(1)
+					char *TableName = GetNameByIP(ip);
+#pragma pack(8)
 					nPort = htons((unsigned short)pTcpTable->table[i].dwRemotePort);
 					len = 2;
-					host = gethostbyaddr((char *)&pTcpTable->table[i].dwRemoteAddr, 4, AF_INET);
-					int LastError = WSAGetLastError();
+					int LastError = 0;
+					if (!TableName)
+					{
+						host = gethostbyaddr((char *)&pTcpTable->table[i].dwRemoteAddr, 4, AF_INET);
+						LastError = WSAGetLastError();
+					}
 					if (LastError == 0)
 					{
-						len += strlen(host->h_name);
+						if (!TableName)
+						{
+							len += strlen(host->h_name);
+							SaveIP(pTcpTable->table[i].dwRemoteAddr, host->h_name);
+						}
+						else
+							len += strlen(TableName);
 #pragma pack(2)
 						if (TCPports[nPort])
 							len += strlen(TCPports[nPort]);
@@ -474,7 +558,10 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 						if (pBuff)
 						{
 #pragma pack(8)
-							strcpy(pBuff, host->h_name);
+							if (!TableName)
+								strcpy(pBuff, host->h_name);
+							else
+								strcpy(pBuff, TableName);
 #pragma pack(2)
 							strcat(pBuff, ":");
 							if (TCPports[nPort])
@@ -500,6 +587,19 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 						addr.sin_addr.S_un.S_addr = pTcpTable->table[i].dwRemoteAddr;
 						memset(tmp_str, 0, CHAR_BUFF);
 						WSAAddressToString((sockaddr *)&addr, sizeof(addr), NULL, (char *)&tmp_str, &dw_len);
+						if (!GetNameByIP(pTcpTable->table[i].dwRemoteAddr))
+						{
+							char tmp_buff[CHAR_BUFF];
+							strcpy(tmp_buff, tmp_str);
+							int count = strlen(tmp_buff);
+							while (tmp_buff[count] != ':')
+							{
+								tmp_buff[count] = 0;
+								count--;
+							}
+							tmp_buff[count] = 0;
+							SaveIP(pTcpTable->table[i].dwRemoteAddr, tmp_buff);
+						}
 #pragma pack(2)
 						strcpy(pItems[i].CustomColumnData[1], tmp_str);
 						if (TCPports[nPort])
@@ -604,11 +704,24 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 			if (Resolve == TRUE)
 			{
 #pragma pack(8)
+				DWORD ip = pTcpTable->table[i].dwLocalAddr;
+#pragma pack(1)
+				char *TableName = GetNameByIP(ip);
+#pragma pack(8)
 				u_short nPort = htons((unsigned short)pUdpTable->table[i - Num].dwLocalPort);
 				DWORD len = 2;
 				char *pBuff;
-				struct hostent *host = gethostbyaddr((char *)&pUdpTable->table[i - Num].dwLocalAddr, 4, AF_INET);
-				len += strlen(host->h_name);
+				struct hostent *host;
+				if (!TableName)
+				{
+					host = gethostbyaddr((char *)&pUdpTable->table[i - Num].dwLocalAddr, 4, AF_INET);
+					len += strlen(host->h_name);
+					SaveIP(pUdpTable->table[i - Num].dwLocalAddr, host->h_name);
+				}
+				else
+				{
+					len += strlen(TableName);
+				}
 #pragma pack(2)
 				if (UDPports[nPort])
 					len += strlen(UDPports[nPort]);
@@ -618,7 +731,10 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				if (pBuff)
 				{
 #pragma pack(8)
-					strcpy(pBuff, host->h_name);
+					if (!TableName)
+						strcpy(pBuff, host->h_name);
+					else
+						strcpy(pBuff, TableName);
 #pragma pack(2)
 					strcat(pBuff, ":");
 					if (UDPports[nPort])
