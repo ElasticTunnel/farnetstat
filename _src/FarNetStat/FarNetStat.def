@@ -9,3 +9,5 @@ EXPORTS
 	ProcessEvent
 	ExitFAR
 	Configure
+	ProcessKey
+

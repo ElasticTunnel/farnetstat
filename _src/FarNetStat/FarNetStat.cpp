@@ -8,7 +8,42 @@
 #define PORTSLST "ports.lst"
 #define BUFFLEN 1024
 #define RESOLVE "Resolve"
+#define RESOLVEPORTS "ResolvePorts"
 #define AUTOREFRESH "AutoRefresh"
+
+#pragma pack(8)
+typedef struct {
+	DWORD dwState;        // state of the connection
+	DWORD dwLocalAddr;    // address on local computer
+	DWORD dwLocalPort;    // port number on local computer
+	DWORD dwRemoteAddr;   // address on remote computer
+	DWORD dwRemotePort;   // port number on remote computer
+	DWORD dwProcessId;
+} MIB_TCPEXROW, *PMIB_TCPEXROW;
+
+typedef struct {
+	DWORD dwNumEntries;
+	MIB_TCPEXROW table[ANY_SIZE];
+} MIB_TCPEXTABLE, *PMIB_TCPEXTABLE;
+
+typedef struct {
+	DWORD dwLocalAddr;    // address on local computer
+	DWORD dwLocalPort;    // port number on local computer
+	DWORD dwProcessId;
+} MIB_UDPEXROW, *PMIB_UDPEXROW;
+
+
+typedef struct {
+	DWORD dwNumEntries;
+	MIB_UDPEXROW table[ANY_SIZE];
+} MIB_UDPEXTABLE, *PMIB_UDPEXTABLE;
+
+DWORD (WINAPI *pAllocateAndGetTcpExTableFromStack)(PMIB_TCPEXTABLE *pTcpTable, BOOL bOrder, HANDLE heap, DWORD zero, DWORD flags);
+DWORD (WINAPI *pAllocateAndGetUdpExTableFromStack)(PMIB_UDPEXTABLE *pTcpTable, BOOL bOrder, HANDLE heap, DWORD zero, DWORD flags);
+HANDLE (WINAPI *pCreateToolhelp32Snapshot)(DWORD dwFlags, DWORD th32ProcessID);
+BOOL (WINAPI *pProcess32First)(HANDLE hSnapshot, LPPROCESSENTRY32 lppe);
+BOOL (WINAPI *pProcess32Next)(HANDLE hSnapshot, LPPROCESSENTRY32 lppe);
+#pragma pack(2)
 
 enum {
 	MTitle,
@@ -19,7 +54,11 @@ enum {
 	MOK,
 	MCancel,
 	MResolve,
-	MAutoRefresh
+	MAutoRefresh,
+	MResolvePorts,
+
+	MProcID,
+	MProcName
 };
 
 const int DIALOG_WIDTH = 45;
@@ -28,9 +67,11 @@ static struct PluginStartupInfo Info;
 static char *UDPports[65536];
 static char *TCPports[65536];
 static BOOL Resolve = FALSE;
+static BOOL ResolvePorts = FALSE;
 static BOOL AutoRefresh = TRUE;
 static BOOL PortsLoaded = FALSE;
 static CRITICAL_SECTION cs;
+static 	BOOL exPresent;
 
 struct IPNameSave
 {
@@ -61,6 +102,210 @@ struct SingleInitDialogItem
 	unsigned char X1,Y1,X2,Y2;
 	signed char Data;
 };
+
+struct ProcIDNames
+{
+	char *name;
+	char *id;
+	ProcIDNames *Next;
+};
+
+ProcIDNames *ProcListHead = NULL;
+
+int AddProcToList(char *Name, DWORD id)
+{
+	int num = 0;
+	ProcIDNames *ProcList = ProcListHead;
+	if (ProcListHead == NULL)
+	{
+		ProcListHead = (ProcIDNames *)malloc(sizeof(ProcIDNames));
+		ProcListHead->id = (char *)malloc(16);
+		strcpy(ProcListHead->id, "0x");
+		itoa(id, &ProcListHead->id[2], 16);
+		if (Name)
+		{
+			ProcListHead->name = (char *)malloc(strlen(Name) + 1);
+			strcpy(ProcListHead->name, Name);
+		}
+		else
+		{
+			ProcListHead->name = (char *)malloc(1);
+			ProcListHead->name[0] = 0;
+		}
+		ProcListHead->Next = NULL;
+	}
+	else
+	{
+		while (ProcList->Next != NULL)
+		{
+			ProcList = ProcList->Next;
+			num++;
+		}
+		ProcList->Next = (ProcIDNames *)malloc(sizeof(ProcIDNames));
+		ProcList = ProcList->Next;
+		ProcList->Next = NULL;
+		ProcList->id = (char *)malloc(16);
+		strcpy(ProcList->id, "0x");
+		itoa(id, &ProcList->id[2], 16);
+		if (Name)
+		{
+			ProcList->name = (char *)malloc(strlen(Name) + 1);
+			strcpy(ProcList->name, Name);
+		}
+		else
+		{
+			ProcList->name = (char *)malloc(1);
+			ProcList->name[0] = 0;
+		}
+	}
+	return num;
+}
+
+char *GetProcIDFromList(int num)
+{
+	char *ret_value = 0;
+	ProcIDNames *ProcList = ProcListHead;
+	for (int i = 0; i <= num; i++)
+	{
+		if (i == num)
+		{
+			if (ProcList)
+				ret_value = ProcList->id;
+			break;
+		}
+		if (ProcList)
+			ProcList = ProcList->Next;
+		else
+			break;
+	}
+	return ret_value;
+}
+
+char *GetProcNameFromList(int num)
+{
+	char *ret_value = NULL;
+	ProcIDNames *ProcList = ProcListHead;
+	for (int i = 0; i <= num; i++)
+	{
+		if (i == num)
+		{
+			if (ProcList)
+				ret_value = ProcList->name;
+			break;
+		}
+		if (ProcList)
+			ProcList = ProcList->Next;
+		else
+			break;
+	}
+	return ret_value;
+}
+
+void ClearProcList()
+{
+	ProcIDNames *TempList;
+	ProcIDNames *ProcList = ProcListHead;
+	while (ProcList)
+	{
+		TempList = ProcList;
+		ProcList = ProcList->Next;
+		free(TempList->name);
+		free(TempList->id);
+		free(TempList);
+	}
+	ProcListHead = NULL;
+}
+
+char *GetMsg(int MsgId)
+{
+	return((char *)Info.GetMsg(Info.ModuleNumber, MsgId));
+}
+
+void InitDialogItems(	const struct SingleInitDialogItem *Init,
+						struct FarDialogItem *Item,
+						int ItemsNumber)
+{
+	struct FarDialogItem *PItem = Item;
+	const struct SingleInitDialogItem *PInit = Init;
+	for (int i = 0;i < ItemsNumber; i++, PItem++, PInit++)
+	{
+		PItem->Type = PInit->Type;
+		PItem->X1 = PInit->X1;
+		PItem->Y1 = PInit->Y1;
+		PItem->X2 = PInit->X2;
+		PItem->Y2 = PInit->Y2;
+		PItem->Focus = 0;
+		PItem->Selected = 0;
+		PItem->DefaultButton = 0;
+		switch(PInit->X2)
+		{
+			case 255:
+				PItem->Flags = DIF_CENTERGROUP;
+			break;
+			default:  
+				PItem->Flags = 0;
+			break;
+		}
+		lstrcpy(PItem->Data, PInit->Data != -1 ? GetMsg(PInit->Data) : "");
+	}
+}
+
+int WINAPI _export ProcessKey(HANDLE hPlugin, int Key, unsigned int ControlState)
+{
+
+#define STR_LEN		14
+#define DLG_WIDTH	STR_LEN + 10
+#define DLG_HEIGHT	8
+	if ((Key == VK_F3) && (exPresent))
+	{
+		PanelInfo Param;
+		Info.Control(hPlugin, FCTL_GETPANELINFO, &Param);
+
+		if (Param.CurrentItem > 0)
+		{
+			char *proc = GetProcNameFromList(Param.CurrentItem - 1);
+			char *id = GetProcIDFromList(Param.CurrentItem - 1);
+
+			int len = 0;
+			if (proc)
+				len = strlen(proc);
+			int len2 = 0;
+			if (id)
+				len2 = strlen(id);
+			if (len2 > len)
+				len = len2;
+
+			static const struct SingleInitDialogItem InitItems[] = {
+				DI_DOUBLEBOX, 3, 1, DLG_WIDTH - 4, DLG_HEIGHT - 2, -1,
+
+				DI_TEXT, 5, 3, 0, 0, MProcID,
+				DI_TEXT, 5 + STR_LEN, 3, 0, 0, -1,
+
+				DI_TEXT, 5, 4, 0, 0, MProcName,
+				DI_TEXT, 5 + STR_LEN, 4, 0, 0, -1,
+			};
+
+			static struct FarDialogItem DialogItems[sizeof(InitItems)/sizeof(InitItems[0])];
+			InitDialogItems(InitItems, DialogItems, sizeof(InitItems)/sizeof(InitItems[0]));
+
+			DialogItems[0].X2 += len;
+
+			if (proc)
+				lstrcpy(DialogItems[2].Data, id);
+			if (id)
+				lstrcpy(DialogItems[4].Data, proc);
+
+			Info.Dialog(	Info.ModuleNumber,
+							-1, -1, DLG_WIDTH + len, DLG_HEIGHT,
+							0,
+							DialogItems,
+							sizeof(DialogItems) / sizeof(DialogItems[0]));
+
+		}
+		return TRUE;
+	}
+	return FALSE;
+}
 
 char *GetNameByIP(DWORD IP)
 {
@@ -99,40 +344,6 @@ void SaveIP(DWORD IP, char *Name)
 			}
 		}
 		LeaveCriticalSection(&cs);
-	}
-}
-
-char *GetMsg(int MsgId)
-{
-	return((char *)Info.GetMsg(Info.ModuleNumber, MsgId));
-}
-
-void InitDialogItems(	const struct SingleInitDialogItem *Init,
-						struct FarDialogItem *Item,
-						int ItemsNumber)
-{
-	struct FarDialogItem *PItem = Item;
-	const struct SingleInitDialogItem *PInit = Init;
-	for (int i = 0;i < ItemsNumber; i++, PItem++, PInit++)
-	{
-		PItem->Type = PInit->Type;
-		PItem->X1 = PInit->X1;
-		PItem->Y1 = PInit->Y1;
-		PItem->X2 = PInit->X2;
-		PItem->Y2 = PInit->Y2;
-		PItem->Focus = 0;
-		PItem->Selected = 0;
-		PItem->DefaultButton = 0;
-		switch(PInit->X2)
-		{
-			case 255:
-				PItem->Flags = DIF_CENTERGROUP;
-			break;
-			default:  
-				PItem->Flags = 0;
-			break;
-		}
-		lstrcpy(PItem->Data, PInit->Data != -1 ? GetMsg(PInit->Data) : "");
 	}
 }
 
@@ -180,8 +391,8 @@ void LoadPorts()
 	{
 		memset(szFileName, 0, strlen(ModName) + 8);
 		strcpy(szFileName, ModName);
-		char *pointer = szFileName + strlen(ModName) + 8;
-		while ((strlen(szFileName) > 0) && (*pointer != '\\'))
+		char *pointer = szFileName + strlen(ModName);
+		while (*pointer != '\\')
 		{
 			*pointer = 0;
 			pointer--;
@@ -237,23 +448,25 @@ int WINAPI _export Configure(int ItemNumber)
 	static const struct SingleInitDialogItem InitItems[] = {
 		DI_DOUBLEBOX, 3, 1, DIALOG_WIDTH - 4, DIALOG_HEIGHT - 2, MTitle,
 		DI_CHECKBOX, 5, 3, 0, 0, MResolve,
-		DI_CHECKBOX, 5, 4, 0, 0, MAutoRefresh,
-		DI_BUTTON, 0, 6, 255, 0, MOK,
-		DI_BUTTON, 0, 6, 255, 0, MCancel
+		DI_CHECKBOX, 5, 4, 0, 0, MResolvePorts,
+		DI_CHECKBOX, 5, 5, 0, 0, MAutoRefresh,
+		DI_BUTTON, 0, 7, 255, 0, MOK,
+		DI_BUTTON, 0, 7, 255, 0, MCancel
 	};
 
 	static struct FarDialogItem DialogItems[sizeof(InitItems)/sizeof(InitItems[0])];
 	InitDialogItems(InitItems, DialogItems, sizeof(InitItems)/sizeof(InitItems[0]));
 
 	DialogItems[1].Selected = Resolve;
-	DialogItems[2].Selected = AutoRefresh;
+	DialogItems[2].Selected = ResolvePorts;
+	DialogItems[3].Selected = AutoRefresh;
 
 	int ExitCode = Info.Dialog(	Info.ModuleNumber,
 								-1, -1, DIALOG_WIDTH, DIALOG_HEIGHT,
 								GetMsg(MTitle),
 								DialogItems,
 								sizeof(DialogItems) / sizeof(DialogItems[0]));
-	if (ExitCode != 3)
+	if (ExitCode != 4)
 		return FALSE;
 
 	HKEY handle_reg_key;
@@ -275,7 +488,16 @@ int WINAPI _export Configure(int ItemNumber)
 						REG_DWORD,
 						(LPBYTE)&chk,
 						sizeof(DWORD));
+		
 		chk = DialogItems[2].Selected;
+		RegSetValueEx(	handle_reg_key,
+						RESOLVEPORTS,
+						NULL,
+						REG_DWORD,
+						(LPBYTE)&chk,
+						sizeof(DWORD));
+
+		chk = DialogItems[3].Selected;
 		RegSetValueEx(	handle_reg_key,
 						AUTOREFRESH,
 						NULL,
@@ -285,8 +507,9 @@ int WINAPI _export Configure(int ItemNumber)
 		RegCloseKey(handle_reg_key);
 	}
 	Resolve = DialogItems[1].Selected;
-	AutoRefresh = DialogItems[2].Selected;
-	if ((Resolve) && (!PortsLoaded))
+	ResolvePorts = DialogItems[2].Selected;
+	AutoRefresh = DialogItems[3].Selected;
+	if ((ResolvePorts) && (!PortsLoaded))
 	{
 		LoadPorts();
 		PortsLoaded = TRUE;
@@ -294,10 +517,32 @@ int WINAPI _export Configure(int ItemNumber)
 	return TRUE;
 }
 
+BOOL ExApisArePresent()
+{
+#pragma pack(8)
+	pAllocateAndGetTcpExTableFromStack = (unsigned long (__stdcall *)(MIB_TCPEXTABLE ** ,int,void *,unsigned long,unsigned long))GetProcAddress(LoadLibrary("iphlpapi.dll"), "AllocateAndGetTcpExTableFromStack");
+	if (!pAllocateAndGetTcpExTableFromStack)
+		return FALSE;
+	pAllocateAndGetUdpExTableFromStack = (unsigned long (__stdcall *)(MIB_UDPEXTABLE ** ,int,void *,unsigned long,unsigned long))GetProcAddress(LoadLibrary("iphlpapi.dll"), "AllocateAndGetUdpExTableFromStack");
+	if (!pAllocateAndGetUdpExTableFromStack)
+		return FALSE;
+	pCreateToolhelp32Snapshot = (void *(__stdcall *)(unsigned long,unsigned long))GetProcAddress(GetModuleHandle("kernel32.dll"), "CreateToolhelp32Snapshot");
+	if(!pCreateToolhelp32Snapshot)
+		return FALSE;
+	pProcess32First = (int (__stdcall *)(void *,struct tagPROCESSENTRY32 *))GetProcAddress(GetModuleHandle("kernel32.dll"), "Process32First");
+	if (!pProcess32First)
+		return FALSE;
+	pProcess32Next = (int (__stdcall *)(void *,struct tagPROCESSENTRY32 *))GetProcAddress(GetModuleHandle("kernel32.dll"),	"Process32Next");
+	if(!pProcess32Next)
+		return FALSE;
+	return TRUE;
+#pragma pack(2)
+}
+
 void WINAPI _export SetStartupInfo(const struct PluginStartupInfo *psi)
 {
 	Info = *psi;
-
+	exPresent = ExApisArePresent();
 	InitializeCriticalSection(&cs);
 
 	WSAData wsadata;
@@ -320,6 +565,17 @@ void WINAPI _export SetStartupInfo(const struct PluginStartupInfo *psi)
 							(LPBYTE)&chk,
 							&tmp_dat);
 		Resolve = chk;
+
+		chk = ResolvePorts;
+		tmp_dat = sizeof(DWORD);
+		RegQueryValueEx(	handle_reg_key,
+							RESOLVEPORTS,
+							NULL,
+							NULL,
+							(LPBYTE)&chk,
+							&tmp_dat);
+		ResolvePorts = chk;
+
 		tmp_dat = sizeof(DWORD);
 		chk = AutoRefresh;
 		RegQueryValueEx(	handle_reg_key,
@@ -333,7 +589,7 @@ void WINAPI _export SetStartupInfo(const struct PluginStartupInfo *psi)
 	}
 	memset(UDPports, 0, sizeof(UDPports));
 	memset(TCPports, 0, sizeof(TCPports));
-	if (Resolve)
+	if (ResolvePorts)
 	{
 		LoadPorts();
 		PortsLoaded = TRUE;
@@ -342,6 +598,7 @@ void WINAPI _export SetStartupInfo(const struct PluginStartupInfo *psi)
 
 void WINAPI _export ExitFAR(void)
 {
+	ClearProcList();
 	for(int i = 0; i < 65536; i++)
 	{
 		if (UDPports[i])
@@ -349,7 +606,6 @@ void WINAPI _export ExitFAR(void)
 		if (TCPports[i])
 			free(TCPports[i]);
 	}
-
 
 	EnterCriticalSection(&cs);
 	IPNameSave *IPNameTmp;
@@ -483,56 +739,96 @@ char *ResolveIP(DWORD IP)
 	return TableName;
 }
 
+void ProcessPidToName(HANDLE hProcessSnap, DWORD ProcessId, PCHAR ProcessName)
+{
+	PROCESSENTRY32 processEntry;
+	processEntry.dwSize = sizeof( processEntry );
+	strcpy( ProcessName, "???" );
+	if(pProcess32First( hProcessSnap, &processEntry ))
+		do {
+			if( processEntry.th32ProcessID == ProcessId )
+			{
+				strcpy( ProcessName, processEntry.szExeFile );
+				break;
+			}
+		} while( pProcess32Next( hProcessSnap, &processEntry ));
+}
+
 int WINAPI _export GetFindData(	HANDLE hPlugin,
 								struct PluginPanelItem **pPanelItem,
 								int *pItemsNumber,
 								int OpMode)
 {
+	ClearProcList();
 #pragma pack(8)
-	MIB_TCPTABLE *pTcpTable;
-	pTcpTable = (MIB_TCPTABLE *) malloc(MIN_BUFF);
-	DWORD dwSize = MIN_BUFF;
+	MIB_TCPTABLE *pTcpTable = NULL;
+	MIB_UDPTABLE *pUdpTable = NULL;
+	unsigned int Num = 0;
+	unsigned int NumUDP = 0;
 	BOOL Ok = FALSE;
-	if (pTcpTable)
-	{
-		if (GetTcpTable(pTcpTable, &dwSize, TRUE) != NO_ERROR)
-		{
-			if (dwSize > MIN_BUFF)
-			{
-				free(pTcpTable);
-				pTcpTable = (MIB_TCPTABLE *) malloc(dwSize);
-				if ((pTcpTable) && (GetTcpTable(pTcpTable, &dwSize, TRUE) == NO_ERROR))
-					Ok = TRUE;
-			}
-		}
-		else
-			Ok = TRUE;
-	}
-
-	MIB_UDPTABLE *pUdpTable;
-	pUdpTable = (MIB_UDPTABLE *) malloc(MIN_BUFF);
-	DWORD dwSizeUDP = MIN_BUFF;
 	BOOL OkUDP = FALSE;
 
-	if (pUdpTable)
-	{
-		if (GetUdpTable(pUdpTable, &dwSizeUDP, TRUE) != NO_ERROR)
-		{
-			if (dwSizeUDP > MIN_BUFF)
-			{
-				free(pUdpTable);
-				pUdpTable = (MIB_UDPTABLE *) malloc(dwSizeUDP);
-				if ((pUdpTable) && (GetUdpTable(pUdpTable, &dwSizeUDP, TRUE) == NO_ERROR))
-					OkUDP = TRUE;
-			}
-		}
-		else
-			OkUDP = TRUE;
-	}
-	unsigned int Num = pTcpTable->dwNumEntries;
-	unsigned int NumUDP = pUdpTable->dwNumEntries;
+	PMIB_TCPEXTABLE tcpExTable = NULL;
+	PMIB_UDPEXTABLE udpExTable = NULL;
+	HANDLE hProcessSnap;
 
+	if (exPresent)
+	{
+		DWORD error;
+		error = pAllocateAndGetTcpExTableFromStack(&tcpExTable, TRUE, GetProcessHeap(), 2, 2);
+		if (!error)
+			Ok = TRUE;
+		error = pAllocateAndGetUdpExTableFromStack(&udpExTable, TRUE, GetProcessHeap(), 2, 2);
+		if (!error)
+			OkUDP = TRUE;
+		hProcessSnap = pCreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+		Num = tcpExTable->dwNumEntries;
+		NumUDP = udpExTable->dwNumEntries;
+	}
+	else
+	{
+		pTcpTable = (MIB_TCPTABLE *) malloc(MIN_BUFF);
+		DWORD dwSize = MIN_BUFF;
+		if (pTcpTable)
+		{
+			if (GetTcpTable(pTcpTable, &dwSize, TRUE) != NO_ERROR)
+			{
+				if (dwSize > MIN_BUFF)
+				{
+					free(pTcpTable);
+					pTcpTable = (MIB_TCPTABLE *) malloc(dwSize);
+					if ((pTcpTable) && (GetTcpTable(pTcpTable, &dwSize, TRUE) == NO_ERROR))
+						Ok = TRUE;
+				}
+			}
+			else
+				Ok = TRUE;
+		}
+
+		pUdpTable = (MIB_UDPTABLE *) malloc(MIN_BUFF);
+		DWORD dwSizeUDP = MIN_BUFF;
+
+		if (pUdpTable)
+		{
+			if (GetUdpTable(pUdpTable, &dwSizeUDP, TRUE) != NO_ERROR)
+			{
+				if (dwSizeUDP > MIN_BUFF)
+				{
+					free(pUdpTable);
+					pUdpTable = (MIB_UDPTABLE *) malloc(dwSizeUDP);
+					if ((pUdpTable) && (GetUdpTable(pUdpTable, &dwSizeUDP, TRUE) == NO_ERROR))
+						OkUDP = TRUE;
+				}
+			}
+			else
+				OkUDP = TRUE;
+		}
+		Num = pTcpTable->dwNumEntries;
+		NumUDP = pUdpTable->dwNumEntries;
+	}
 #pragma pack(2)
+
 	PluginPanelItem *pItems = (PluginPanelItem *)malloc ((Num + NumUDP) * sizeof(PluginPanelItem));
 	memset (pItems, 0, (Num + NumUDP) * sizeof PluginPanelItem); 
 
@@ -542,21 +838,40 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 		if (Ok)
 		for (; i < Num; i++)
 		{
+			if (exPresent)
+			{
+				char pid_name[260];
+				memset(pid_name, 0, sizeof(pid_name));
+				ProcessPidToName(hProcessSnap, tcpExTable->table[i].dwProcessId, (char *)&pid_name);
+				AddProcToList(pid_name, tcpExTable->table[i].dwProcessId);
+			}
+
 			strcpy (pItems[i].FindData.cFileName, " tcp ");
 			pItems[i].CustomColumnData = (char**) malloc (NCOUNT * sizeof(void *));
 			pItems[i].CustomColumnNumber = NCOUNT;
 			if (Resolve == TRUE)
 			{
-#pragma pack(8)
 				DWORD len = 2;
-				DWORD ip = pTcpTable->table[i].dwLocalAddr;
-				u_short nPort = htons((unsigned short)pTcpTable->table[i].dwLocalPort);
+				DWORD ip = 0;
+				u_short nPort = 0;
+
+#pragma pack(8)
+				if (exPresent)
+				{
+					ip = tcpExTable->table[i].dwLocalAddr;
+					nPort = htons((unsigned short)tcpExTable->table[i].dwLocalPort);
+				}
+				else
+				{
+					ip = pTcpTable->table[i].dwLocalAddr;
+					nPort = htons((unsigned short)pTcpTable->table[i].dwLocalPort);
+				}
 #pragma pack(2)
 				char *TableName = ResolveIP(ip);
 				char *pBuff;
 				if (TableName)
 					len += strlen(TableName);				
-				if (TCPports[nPort])
+				if ((TCPports[nPort]) && (ResolvePorts))
 					len += strlen(TCPports[nPort]);
 				else
 					len += 5;
@@ -568,7 +883,7 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 					else
 						strcpy(pBuff, "");
 					strcat(pBuff, ":");
-					if (TCPports[nPort])
+					if ((TCPports[nPort]) && (ResolvePorts))
 						strcat(pBuff, TCPports[nPort]);
 					else
 					{
@@ -579,7 +894,15 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				}
 				pItems[i].CustomColumnData[0] = pBuff;
 
-				if (pTcpTable->table[i].dwState == MIB_TCP_STATE_LISTEN)
+				DWORD lisValue;
+
+#pragma pack(8)
+				if (exPresent)
+					lisValue = tcpExTable->table[i].dwState;
+				else
+					lisValue = pTcpTable->table[i].dwState;
+#pragma pack(2)
+				if (lisValue == MIB_TCP_STATE_LISTEN)
 				{
 					char *tBuff = (char *)malloc(1);
 					if (tBuff)
@@ -589,15 +912,23 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 				else
 				{
 #pragma pack(8)
-					DWORD ip = pTcpTable->table[i].dwRemoteAddr;
-					nPort = htons((unsigned short)pTcpTable->table[i].dwRemotePort);
-#pragma pack(2)
+					if (exPresent)
+					{
+						ip = tcpExTable->table[i].dwRemoteAddr;
+						nPort = htons((unsigned short)tcpExTable->table[i].dwRemotePort);
+					}
+					else
+					{
+						ip = pTcpTable->table[i].dwRemoteAddr;
+						nPort = htons((unsigned short)pTcpTable->table[i].dwRemotePort);
+					}
+#pragma pack(8)
 					char *TableName = ResolveIP(ip);
 
 					len = 2;
 					if (TableName)
 						len += strlen(TableName);
-					if (TCPports[nPort])
+					if ((TCPports[nPort]) && (ResolvePorts))
 						len += strlen(TCPports[nPort]);
 					else
 						len += 5;
@@ -607,7 +938,7 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 						if (TableName)
 							strcpy(pBuff, TableName);
 						strcat(pBuff, ":");
-						if (TCPports[nPort])
+						if ((TCPports[nPort]) && (ResolvePorts))
 							strcat(pBuff, TCPports[nPort]);
 						else
 						{
@@ -621,43 +952,112 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 			}
 			else
 			{
-				pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF);
-				memset(pItems[i].CustomColumnData[0], 0, CHAR_BUFF);
+				char buff[MIN_BUFF];
+				DWORD ip = 0;
+				u_short nPort = 0;
 #pragma pack(8)
-				DWORD ip = pTcpTable->table[i].dwLocalAddr;
-				u_short nPort = htons((unsigned short)pTcpTable->table[i].dwLocalPort);
+				if (exPresent)
+				{
+					ip = tcpExTable->table[i].dwLocalAddr;
+					nPort = htons((unsigned short)tcpExTable->table[i].dwLocalPort);
+				}
+				else
+				{
+					ip = pTcpTable->table[i].dwLocalAddr;
+					nPort = htons((unsigned short)pTcpTable->table[i].dwLocalPort);
+				}
 #pragma pack(2)
+				if ((TCPports[nPort]) && (ResolvePorts))
+				{
+					pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF + strlen(TCPports[nPort]));
+					memset(pItems[i].CustomColumnData[0], 0, CHAR_BUFF + strlen(TCPports[nPort]));
+				}
+				else
+				{
+					pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF);
+					memset(pItems[i].CustomColumnData[0], 0, CHAR_BUFF);
+				}
 				char *TransBuff = TranslateIP(ip);
 				if (TransBuff)
 					strcpy(pItems[i].CustomColumnData[0], TransBuff);
 				strcat(pItems[i].CustomColumnData[0], ":");
-				char buff[MIN_BUFF];
-				memset(buff, 0, sizeof(buff));
-				itoa(nPort, buff, 10);
-				strcat(pItems[i].CustomColumnData[0], buff);
+
+				if ((TCPports[nPort]) && (ResolvePorts))
+				{
+					strcat(pItems[i].CustomColumnData[0], TCPports[nPort]);
+				}
+				else
+				{
+					memset(buff, 0, sizeof(buff));
+					itoa(nPort, buff, 10);
+					strcat(pItems[i].CustomColumnData[0], buff);
+				}
 				
-				pItems[i].CustomColumnData[1] = (char *) malloc(CHAR_BUFF);
-				memset(pItems[i].CustomColumnData[1], 0, CHAR_BUFF);
-				if (pTcpTable->table[i].dwState != MIB_TCP_STATE_LISTEN)
+				DWORD ifValue;
+#pragma pack(8)
+				if (exPresent)
+					ifValue = tcpExTable->table[i].dwState;
+				else
+					ifValue = pTcpTable->table[i].dwState;
+#pragma pack(2)
+
+				if (ifValue != MIB_TCP_STATE_LISTEN)
 				{
 #pragma pack(8)
-					ip = pTcpTable->table[i].dwRemoteAddr;
-					nPort = htons((unsigned short)pTcpTable->table[i].dwRemotePort);
+					if (exPresent)
+					{
+						ip = tcpExTable->table[i].dwRemoteAddr;
+						nPort = htons((unsigned short)tcpExTable->table[i].dwRemotePort);
+					}
+					else
+					{
+						ip = pTcpTable->table[i].dwRemoteAddr;
+						nPort = htons((unsigned short)pTcpTable->table[i].dwRemotePort);
+					}
 #pragma pack(2)
+					if ((TCPports[nPort]) && (ResolvePorts))
+					{
+						pItems[i].CustomColumnData[1] = (char *) malloc(CHAR_BUFF + strlen(TCPports[nPort]));
+						memset(pItems[i].CustomColumnData[1], 0, CHAR_BUFF + strlen(TCPports[nPort]));
+					}
+					else
+					{
+						pItems[i].CustomColumnData[1] = (char *) malloc(CHAR_BUFF);
+						memset(pItems[i].CustomColumnData[1], 0, CHAR_BUFF);
+					}
+
 					TransBuff = TranslateIP(ip);
 					if (TransBuff)
 						strcpy(pItems[i].CustomColumnData[1], TransBuff);
 					strcat(pItems[i].CustomColumnData[1], ":");
-					memset(buff, 0, sizeof(buff));
-					itoa(nPort, buff, 10);
-					strcat(pItems[i].CustomColumnData[1], buff);
+					if ((TCPports[nPort]) && (ResolvePorts))
+					{
+						strcat(pItems[i].CustomColumnData[1], TCPports[nPort]);
+					}
+					else
+					{
+						memset(buff, 0, sizeof(buff));
+						itoa(nPort, buff, 10);
+						strcat(pItems[i].CustomColumnData[1], buff);
+					}
+				}
+				else
+				{
+					pItems[i].CustomColumnData[1] = (char *) malloc(1);
+					memset(pItems[i].CustomColumnData[1], 0, 1);
 				}
 			}
 			pItems[i].CustomColumnData[2] = (char *) malloc(CHAR_BUFF);
 			memset(pItems[i].CustomColumnData[2], 0, CHAR_BUFF);
+
+			DWORD swValue = -1;
 #pragma pack(8)
-			switch (pTcpTable->table[i].dwState)
+			if (exPresent)
+				swValue = tcpExTable->table[i].dwState;
+			else
+				swValue = pTcpTable->table[i].dwState;
 #pragma pack(2)
+			switch (swValue)
 			{
 				case MIB_TCP_STATE_CLOSED:
 					strcpy(pItems[i].CustomColumnData[2], "CLOSED");
@@ -703,22 +1103,40 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 		if (OkUDP)
 		for (; i < (Num + NumUDP); i++)
 		{
+			if (exPresent)
+			{
+				char pid_name[260];
+				memset(pid_name, 0, sizeof(pid_name));
+				ProcessPidToName(hProcessSnap, udpExTable->table[i - Num].dwProcessId, (char *)&pid_name);
+				AddProcToList(pid_name, udpExTable->table[i - Num].dwProcessId);
+			}
+
 			strcpy (pItems[i].FindData.cFileName, " udp ");
 			pItems[i].CustomColumnData = (char**) malloc (NCOUNT * sizeof(void *));
 			pItems[i].CustomColumnNumber = NCOUNT;
 
 			if (Resolve == TRUE)
 			{
+				DWORD ip = 0;
+				u_short nPort = 0;
 #pragma pack(8)
-				DWORD ip = pUdpTable->table[i - Num].dwLocalAddr;
-				u_short nPort = htons((unsigned short)pUdpTable->table[i - Num].dwLocalPort);
+				if (exPresent)
+				{
+					ip = udpExTable->table[i - Num].dwLocalAddr;
+					nPort = htons((unsigned short)udpExTable->table[i - Num].dwLocalPort);
+				}
+				else
+				{
+					ip = pUdpTable->table[i - Num].dwLocalAddr;
+					nPort = htons((unsigned short)pUdpTable->table[i - Num].dwLocalPort);
+				}
 #pragma pack(2)
 				char *TableName = ResolveIP(ip);
 				char *pBuff;
 				int len = 2;
 				if (TableName)
 					len += strlen(TableName);
-				if (UDPports[nPort])
+				if ((UDPports[nPort]) && (ResolvePorts))
 					len += strlen(UDPports[nPort]);
 				else
 					len += 5;
@@ -728,7 +1146,7 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 					if (TableName)
 						strcpy(pBuff, TableName);
 					strcat(pBuff, ":");
-					if (UDPports[nPort])
+					if ((UDPports[nPort]) && (ResolvePorts))
 						strcat(pBuff, UDPports[nPort]);
 					else
 					{
@@ -741,20 +1159,46 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 			}
 			else
 			{				
-				pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF);
-				memset(pItems[i].CustomColumnData[0], 0, CHAR_BUFF);
+				DWORD ip = 0;
+				u_short nPort = 0;
 #pragma pack(8)
-				DWORD ip = pUdpTable->table[i - Num].dwLocalAddr;
-				u_short nPort = htons((unsigned short)pUdpTable->table[i - Num].dwLocalPort);
+				if (exPresent)
+				{
+					ip = udpExTable->table[i - Num].dwLocalAddr;
+					nPort = htons((unsigned short)udpExTable->table[i - Num].dwLocalPort);
+				}
+				else
+				{
+					ip = pUdpTable->table[i - Num].dwLocalAddr;
+					nPort = htons((unsigned short)pUdpTable->table[i - Num].dwLocalPort);
+				}
 #pragma pack(2)
+				if ((UDPports[nPort]) && (ResolvePorts))
+				{
+					pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF + strlen(UDPports[nPort]));
+					memset(pItems[i].CustomColumnData[0], 0, CHAR_BUFF + strlen(UDPports[nPort]));
+				}
+				else
+				{
+					pItems[i].CustomColumnData[0] = (char *) malloc(CHAR_BUFF);
+					memset(pItems[i].CustomColumnData[0], 0, CHAR_BUFF);
+				}
 				char *TransBuff = TranslateIP(ip);
 				if (TransBuff)
 					strcpy(pItems[i].CustomColumnData[0], TransBuff);
 				strcat(pItems[i].CustomColumnData[0], ":");
-				char buff[MIN_BUFF];
-				memset(buff, 0, sizeof(buff));
-				itoa(nPort, buff, 10);
-				strcat(pItems[i].CustomColumnData[0], buff);
+
+				if ((UDPports[nPort]) && (ResolvePorts))
+				{
+					strcat(pItems[i].CustomColumnData[0], UDPports[nPort]);
+				}
+				else
+				{
+					char buff[MIN_BUFF];
+					memset(buff, 0, sizeof(buff));
+					itoa(nPort, buff, 10);
+					strcat(pItems[i].CustomColumnData[0], buff);
+				}
 			}
 			pItems[i].CustomColumnData[1] = (char *) malloc(CHAR_BUFF);
 			memset(pItems[i].CustomColumnData[1], 0, CHAR_BUFF);
