@@ -1,0 +1,12 @@
+.Language=Russian,Russian (Русский)
+.PluginContents=Сетевые соединения
+
+@Contents
+$ #Far NetStat#
+ Far NetStat плагин.
+ Версия: 1.0
+ Предназначение: Плагин отражает текущие tcp и udp содинения.
+ Автор: bobik (Явдошенко Владимир).
+ Почта: bob-job@@mail.ru
+ Дата: 11 марта 2005г.
+

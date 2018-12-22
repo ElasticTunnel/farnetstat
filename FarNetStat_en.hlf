@@ -1,0 +1,11 @@
+.Language=English,English (English)
+.PluginContents=Network Statistics
+
+@Contents
+$ #Far NetStat#
+ Far NetStat plugin.
+ Version: 1.0
+ Destiny: Plugin show current tcp and udp connections.
+ Author: bobik (Yavdoshenko Vladimir).
+ email: bob-job@@mail.ru
+ Date: 11 march 2005.

@@ -1,0 +1,8 @@
+LIBRARY FarNetStat
+EXPORTS
+	GetPluginInfo
+	OpenPlugin
+	SetStartupInfo
+	GetOpenPluginInfo
+	GetFindData
+	FreeFindData

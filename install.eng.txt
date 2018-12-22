@@ -1,0 +1,15 @@
+                 Plugin NetStat for FAR manager.
+           Copyright 2005, Vladimir Yavdoshenko (bobik).
+
+ How to install:
+  1. Exit from all FAR copies.
+  2. Run "Windows Explorer"
+  3. Create "FarNetStat" folder in "FAR\Plugins" directory.
+  4. Copy files from this archive to "FarNetStat" folder.
+  5. Run FAR.
+  6. In "File panels" press ALT+F1/F2 (or F11) and select 
+     "Network Statistics".
+
+  Send your wishes and bug reports to: bob-job@mail.ru
+ 
+  Vladimir Yavdoshenko                      11 march 2005
