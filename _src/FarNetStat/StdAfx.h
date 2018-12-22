@@ -20,7 +20,8 @@
 #include "plugin.hpp" // этот файл хочет 1-byte alignment
 #pragma pack(8)
 #include <wincon.h>   // этот файл хочет 8-bytes alignment
-#include <malloc.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include <Winsock2.h>
 #include <Iphlpapi.h>
 
