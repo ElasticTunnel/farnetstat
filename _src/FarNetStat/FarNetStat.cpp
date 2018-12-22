@@ -770,7 +770,7 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 
 	PMIB_TCPEXTABLE tcpExTable = NULL;
 	PMIB_UDPEXTABLE udpExTable = NULL;
-	HANDLE hProcessSnap;
+	HANDLE hProcessSnap = NULL;
 
 	if (exPresent)
 	{
@@ -1213,6 +1213,10 @@ int WINAPI _export GetFindData(	HANDLE hPlugin,
 
 	if (pUdpTable)
 		free(pUdpTable);
+
+	if (hProcessSnap)
+		CloseHandle(hProcessSnap);
+
 
     *pPanelItem = pItems; 
     *pItemsNumber = Num + NumUDP;
